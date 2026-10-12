@@ -1,0 +1,71 @@
+import React, { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { createRoot } from "react-dom/client";
+import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { Archive, CirclePlay, FolderOpen, HardDrive, LoaderCircle, Network, RefreshCw, Save, Server, ShieldCheck, Square, Terminal, TriangleAlert } from "lucide-react";
+import "./styles.css";
+
+type Config = Record<string, string>;
+type ServerStatus = { installed: boolean; steamcmd_found: boolean; executable?: string; is_running: boolean; install_dir?: string; message: string };
+type NetworkReport = { port: number; listening: boolean; firewall_rule: boolean; public_ip?: string; external_verification: string };
+type BackupResult = { changed: boolean; message: string; backup?: string; total_bytes: number };
+const blankConfig: Config = { OwnerId: "", ServerName: "My Dragonwilds Server", DefaultWorldName: "My World", AdminPassword: "", WorldPassword: "" };
+
+function App() {
+  const [installDir, setInstallDir] = useState("");
+  const [status, setStatus] = useState<ServerStatus | null>(null);
+  const [config, setConfig] = useState<Config>(blankConfig);
+  const [network, setNetwork] = useState<NetworkReport | null>(null);
+  const [notice, setNotice] = useState("Choose a folder for your dedicated server to begin.");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [backup, setBackup] = useState({ enabled: true, interval_minutes: 30, max_gib: 20, compress_after_hours: 24 });
+  const lastAutomaticBackup = useRef(0);
+
+  const ready = useMemo(() => Boolean(config.OwnerId && config.ServerName && config.DefaultWorldName && config.AdminPassword), [config]);
+  const call = async <T,>(name: string, args?: Record<string, unknown>) => invoke<T>(name, args);
+  const refresh = async (root = installDir) => {
+    const next = await call<ServerStatus>("inspect_server", { installDir: root });
+    setStatus(next);
+    if (next.installed) { setConfig(await call<Config>("read_config", { installDir: root })); setBackup(await call<typeof backup>("get_backup_plan", { installDir: root })); }
+  };
+  useEffect(() => { call<string | null>("get_last_install_dir").then((path) => { if (path) { setInstallDir(path); refresh(path); } }).catch(() => undefined); }, []);
+  useEffect(() => { const id = window.setInterval(() => installDir && refresh().catch(() => undefined), 5_000); return () => clearInterval(id); }, [installDir]);
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const due = Date.now() - lastAutomaticBackup.current >= backup.interval_minutes * 60_000;
+      if (installDir && status?.installed && backup.enabled && due && !busy) {
+        lastAutomaticBackup.current = Date.now();
+        call<BackupResult>("run_backup", { installDir }).then((result) => setNotice(result.message)).catch((error) => setNotice(String(error)));
+      }
+    }, 30_000);
+    return () => clearInterval(id);
+  }, [installDir, status?.installed, backup.enabled, backup.interval_minutes, busy]);
+  const run = async (label: string, action: () => Promise<void>) => { setBusy(label); try { await action(); } catch (e) { setNotice(String(e)); } finally { setBusy(null); } };
+  const pickFolder = async () => { const selected = await open({ directory: true, multiple: false, title: "Choose an SSD-backed folder for Dragonwilds" }); if (typeof selected === "string") { setInstallDir(selected); await call("remember_install_dir", { installDir: selected }); await refresh(selected); } };
+  const install = () => run("install", async () => { if (!installDir) throw new Error("Choose an empty folder first."); setNotice(await call<string>("install_server", { installDir })); await refresh(); });
+  const start = () => run("start", async () => { if (!ready) throw new Error("Complete the required configuration before starting."); await call("save_config", { installDir, config }); setNotice(await call<string>("start_server", { installDir })); await refresh(); });
+  const stop = () => run("stop", async () => { setNotice(await call<string>("stop_server", {})); await refresh(); });
+  const saveConfig = (e: FormEvent) => { e.preventDefault(); run("config", async () => { setNotice(await call<string>("save_config", { installDir, config })); }); };
+  const testNetwork = () => run("network", async () => { const report = await call<NetworkReport>("check_network", { installDir, port: 7777 }); setNetwork(report); setNotice(report.external_verification); });
+  const saveBackup = () => run("backup settings", async () => { await call("set_backup_plan", { installDir, plan: backup }); setNotice("Backup plan saved. DragonWarden only creates a snapshot when the save data changes."); });
+  const takeBackup = () => run("backup", async () => { const result = await call<BackupResult>("run_backup", { installDir }); setNotice(result.message); });
+  const value = (key: string) => config[key] ?? "";
+
+  return <main className="min-h-screen bg-[#0d1110] text-stone-100 selection:bg-lime-400 selection:text-black">
+    <header className="border-b border-white/10 bg-[#101714]"><div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-5"><div className="flex items-center gap-3"><div className="grid size-10 place-items-center rounded-xl bg-lime-400 text-black"><Server size={21}/></div><div><h1 className="text-xl font-bold tracking-tight">DragonWarden</h1><p className="text-xs text-stone-400">Dragonwilds dedicated server manager</p></div></div><button onClick={() => refresh().catch((e) => setNotice(String(e)))} className="icon-button" title="Refresh"><RefreshCw size={17} className={busy ? "animate-spin" : ""}/></button></div></header>
+    <section className="mx-auto max-w-6xl px-6 py-8"><div className="mb-6 flex items-center gap-3 rounded-xl border border-lime-400/20 bg-lime-400/5 px-4 py-3 text-sm text-lime-100"><ShieldCheck size={19}/><span>{notice}</span></div>
+      <div className="grid gap-6 lg:grid-cols-[1.25fr_.75fr]">
+        <div className="space-y-6">
+          <section className="panel"><div className="panel-title"><HardDrive/><div><h2>Server location</h2><p>Pick a dedicated folder. An SSD is strongly recommended for world saves and faster updates.</p></div></div><div className="flex gap-3"><input className="field" value={installDir} readOnly placeholder="Choose an install folder"/><button className="secondary-button shrink-0" onClick={pickFolder}><FolderOpen size={17}/> Browse</button></div>{installDir && <div className="mt-4 flex flex-wrap gap-3"><StatusChip ok={Boolean(status?.steamcmd_found)} text={status?.steamcmd_found ? "SteamCMD ready" : "SteamCMD will be downloaded"}/><StatusChip ok={Boolean(status?.installed)} text={status?.installed ? "Server installed" : "Server not installed"}/><button onClick={install} disabled={Boolean(busy)} className="primary-button">{busy === "install" ? <LoaderCircle className="animate-spin"/> : <Terminal/>}{status?.installed ? "Check for updates" : "Install server"}</button></div>}</section>
+          <section className="panel"><div className="panel-title"><CirclePlay/><div><h2>Server controls</h2><p>Always starts with <code>-log -NewConsole</code> so you can see the live server console.</p></div></div><div className="flex items-center justify-between rounded-lg bg-black/20 p-4"><div><p className="font-semibold">{status?.is_running ? "Server running" : "Server stopped"}</p><p className="text-sm text-stone-400">{status?.message ?? "Waiting for a server location."}</p></div>{status?.is_running ? <button onClick={stop} disabled={Boolean(busy)} className="danger-button"><Square size={16}/> Stop safely</button> : <button onClick={start} disabled={!status?.installed || !ready || Boolean(busy)} className="primary-button"><CirclePlay size={16}/> Start server</button>}</div></section>
+          <section className="panel"><div className="panel-title"><Network/><div><h2>Connection readiness</h2><p>Checks the local UDP listener, Windows firewall rule, and your public IP.</p></div></div><div className="flex items-center gap-3"><button onClick={testNetwork} disabled={!status?.installed || Boolean(busy)} className="secondary-button">{busy === "network" ? <LoaderCircle className="animate-spin"/> : <Network size={17}/>} Run port check</button>{network && <p className="text-sm text-stone-300">UDP {network.port}: {network.listening ? "listening" : "not listening"} · Firewall: {network.firewall_rule ? "allowed" : "needs rule"} · Public IP: {network.public_ip ?? "unavailable"}</p>}</div>{network && <p className="mt-3 text-xs text-amber-200"><TriangleAlert className="mr-1 inline size-3"/>{network.external_verification}</p>}</section>
+          <section className="panel"><div className="panel-title"><Archive/><div><h2>Smart world backups</h2><p>Snapshots SaveGames only after a change. Old backups are zipped, then oldest archives are evicted to stay within your limit. Automatic runs occur while DragonWarden is open.</p></div></div><div className="grid gap-4 sm:grid-cols-2"><Toggle label="Automatic backups" checked={backup.enabled} onChange={(enabled) => setBackup({...backup, enabled})}/><NumberField label="Every (minutes)" value={backup.interval_minutes} onChange={(interval_minutes) => setBackup({...backup, interval_minutes})}/><NumberField label="Maximum storage (GiB)" value={backup.max_gib} onChange={(max_gib) => setBackup({...backup, max_gib})}/><NumberField label="Zip after (hours)" value={backup.compress_after_hours} onChange={(compress_after_hours) => setBackup({...backup, compress_after_hours})}/></div><div className="mt-5 flex gap-3"><button onClick={saveBackup} className="secondary-button"><Save size={17}/> Save plan</button><button onClick={takeBackup} disabled={!status?.installed || Boolean(busy)} className="secondary-button">{busy === "backup" ? <LoaderCircle className="animate-spin"/> : <Archive size={17}/>} Back up now</button></div></section>
+        </div>
+        <form onSubmit={saveConfig} className="panel h-fit"><div className="panel-title"><Save/><div><h2>Server configuration</h2><p>{status?.is_running ? "Stop the server to change settings." : "Written to DedicatedServer.ini on save."}</p></div></div><div className="space-y-4">{[["OwnerId", "Owner ID", "Your in-game Player ID"], ["ServerName", "Server name", "Shown in the world browser"], ["DefaultWorldName", "Default world name", "Used for a new world"], ["AdminPassword", "Admin password", "Required; grants Server Management access"], ["WorldPassword", "World password (optional)", "Blank means public"]].map(([key, label, hint]) => <label key={key} className="block"><span className="mb-1 block text-sm font-medium">{label}{key !== "WorldPassword" && <em className="ml-1 text-lime-300 not-italic">required</em>}</span><input disabled={status?.is_running} required={key !== "WorldPassword"} type={key.includes("Password") ? "password" : "text"} className="field" value={value(key)} placeholder={hint} onChange={(e) => setConfig({...config, [key]: e.target.value})}/></label>)}</div><button type="submit" disabled={Boolean(status?.is_running) || !status?.installed || Boolean(busy)} className="primary-button mt-5 w-full"><Save size={17}/> Save configuration</button><button type="button" onClick={() => openUrl("https://runescapedragonwilds.help.jagex.com/hc/en-gb/articles/45365343055249-Dedicated-Servers-How-to-Guide")} className="mt-4 text-sm text-lime-300 underline underline-offset-4">Open the official setup guide</button></form>
+      </div></section></main>;
+}
+function StatusChip({ ok, text }: { ok: boolean; text: string }) { return <span className={`rounded-full border px-3 py-1 text-xs ${ok ? "border-lime-400/30 bg-lime-400/10 text-lime-200" : "border-amber-400/30 bg-amber-400/10 text-amber-100"}`}>{text}</span>; }
+function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (value: boolean) => void }) { return <label className="flex items-center justify-between rounded-lg bg-black/20 px-3 py-3 text-sm"><span>{label}</span><input type="checkbox" className="size-4 accent-lime-400" checked={checked} onChange={(e) => onChange(e.target.checked)}/></label>; }
+function NumberField({ label, value, onChange }: { label: string; value: number; onChange: (value: number) => void }) { return <label className="text-sm"><span className="mb-1 block text-stone-300">{label}</span><input className="field" min="1" type="number" value={value} onChange={(e) => onChange(Number(e.target.value))}/></label>; }
+createRoot(document.getElementById("root")!).render(<React.StrictMode><App /></React.StrictMode>);
