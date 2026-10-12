@@ -9,6 +9,7 @@ A Windows desktop manager for a RuneScape: Dragonwilds dedicated server, built w
 - Creates and preserves `RSDragonwilds/Saved/Config/WindowsServer/DedicatedServer.ini` values.
 - Reports local UDP 7777 listener, firewall readiness, and public IP; the UI clearly marks router/NAT verification as an external test because UDP forwarding cannot be reliably self-tested from the LAN.
 - Backs up only changed world saves, zips older snapshots, and evicts oldest backups above the selected storage limit.
+- Imports `.sav` world files, lists live saves and managed backups, duplicates worlds, and restores or deletes them only after confirmation.
 
 ## Run locally
 

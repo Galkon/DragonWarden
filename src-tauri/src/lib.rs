@@ -12,7 +12,7 @@ use std::{
 };
 use tauri::State;
 use walkdir::WalkDir;
-use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
+use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
 const APP_ID: &str = "4019830";
 const REQUIRED: [&str; 4] = ["OwnerId", "ServerName", "DefaultWorldName", "AdminPassword"];
@@ -44,6 +44,19 @@ struct BackupResult {
     message: String,
     backup: Option<String>,
     total_bytes: u64,
+}
+#[derive(Serialize)]
+struct LibraryItem {
+    key: String,
+    name: String,
+    size_bytes: u64,
+    modified: String,
+    compressed: bool,
+}
+#[derive(Serialize)]
+struct WorldLibrary {
+    worlds: Vec<LibraryItem>,
+    backups: Vec<LibraryItem>,
 }
 #[derive(Serialize, Deserialize, Clone)]
 struct BackupPlan {
@@ -171,6 +184,80 @@ fn is_running(state: &AppState) -> bool {
         })
         .is_none()
         && state.server.lock().map(|x| x.is_some()).unwrap_or(false)
+}
+fn timestamp(time: SystemTime) -> String {
+    chrono::DateTime::<Local>::from(time)
+        .format("%Y-%m-%d %H:%M")
+        .to_string()
+}
+fn library_item(base: &Path, path: &Path, compressed: bool) -> Result<LibraryItem, String> {
+    let meta = path.metadata().map_err(|e| e.to_string())?;
+    Ok(LibraryItem {
+        key: path
+            .strip_prefix(base)
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .replace('\\', "/"),
+        name: path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("Unnamed")
+            .to_owned(),
+        size_bytes: if meta.is_file() {
+            meta.len()
+        } else {
+            size(path)
+        },
+        modified: timestamp(meta.modified().unwrap_or(SystemTime::UNIX_EPOCH)),
+        compressed,
+    })
+}
+fn safe_existing_child(base: &Path, key: &str) -> Result<PathBuf, String> {
+    let relative = Path::new(key);
+    if relative.is_absolute()
+        || relative.components().any(|part| {
+            matches!(
+                part,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err("Invalid file path.".into());
+    }
+    let base = base
+        .canonicalize()
+        .map_err(|_| "The world folder does not exist yet.")?;
+    let target = base
+        .join(relative)
+        .canonicalize()
+        .map_err(|_| "The requested file no longer exists.")?;
+    if !target.starts_with(&base) {
+        return Err("Requested file is outside the managed folder.".into());
+    }
+    Ok(target)
+}
+fn unique_copy_destination(directory: &Path, source_name: &str) -> PathBuf {
+    let source = Path::new(source_name);
+    let stem = source
+        .file_stem()
+        .and_then(|x| x.to_str())
+        .unwrap_or("world");
+    let extension = source.extension().and_then(|x| x.to_str()).unwrap_or("sav");
+    let mut count = 0;
+    loop {
+        let label = if count == 0 {
+            format!("{stem}.{extension}")
+        } else {
+            format!("{stem} copy {count}.{extension}")
+        };
+        let candidate = directory.join(label);
+        if !candidate.exists() {
+            return candidate;
+        }
+        count += 1;
+    }
 }
 
 #[tauri::command]
@@ -369,6 +456,233 @@ fn check_network(install_dir: String, port: u16) -> Result<NetworkReport, String
         .filter(|s| !s.is_empty());
     let _ = root;
     Ok(NetworkReport { port, listening, firewall_rule: rule, public_ip, external_verification: "UDP forwarding cannot be proven from the same home network. Forward UDP 7777 on your router to this PC, then have someone outside your network join or use a remote UDP testing service.".into() })
+}
+
+#[tauri::command]
+fn list_world_library(install_dir: String) -> Result<WorldLibrary, String> {
+    let root = root(&install_dir)?;
+    let saves = saves_path(&root);
+    let worlds = if saves.exists() {
+        WalkDir::new(&saves)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.file_type().is_file()
+                    && entry
+                        .path()
+                        .extension()
+                        .and_then(|x| x.to_str())
+                        .map(|x| x.eq_ignore_ascii_case("sav"))
+                        .unwrap_or(false)
+            })
+            .filter_map(|entry| library_item(&saves, entry.path(), false).ok())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let backups = if backups_path(&root).exists() {
+        fs::read_dir(backups_path(&root))
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.path().is_dir()
+                    || entry
+                        .path()
+                        .extension()
+                        .and_then(|x| x.to_str())
+                        .map(|x| x.eq_ignore_ascii_case("zip"))
+                        .unwrap_or(false)
+            })
+            .filter_map(|entry| {
+                library_item(
+                    &backups_path(&root),
+                    &entry.path(),
+                    entry
+                        .path()
+                        .extension()
+                        .and_then(|x| x.to_str())
+                        .map(|x| x.eq_ignore_ascii_case("zip"))
+                        .unwrap_or(false),
+                )
+                .ok()
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok(WorldLibrary { worlds, backups })
+}
+
+#[tauri::command]
+fn import_world(
+    install_dir: String,
+    source_path: String,
+    state: State<AppState>,
+) -> Result<String, String> {
+    if is_running(&state) {
+        return Err("Stop the server before importing a world.".into());
+    }
+    let source = PathBuf::from(source_path);
+    if !source.is_file()
+        || !source
+            .extension()
+            .and_then(|x| x.to_str())
+            .map(|x| x.eq_ignore_ascii_case("sav"))
+            .unwrap_or(false)
+    {
+        return Err("Choose a valid .sav world file.".into());
+    }
+    let saves = saves_path(&root(&install_dir)?);
+    fs::create_dir_all(&saves).map_err(|e| e.to_string())?;
+    let name = source
+        .file_name()
+        .and_then(|x| x.to_str())
+        .ok_or("World filename is invalid.")?;
+    let target = unique_copy_destination(&saves, name);
+    fs::copy(source, &target).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "Imported {} into SaveGames.",
+        target
+            .file_name()
+            .and_then(|x| x.to_str())
+            .unwrap_or("world")
+    ))
+}
+
+#[tauri::command]
+fn duplicate_world(
+    install_dir: String,
+    world_key: String,
+    state: State<AppState>,
+) -> Result<String, String> {
+    if is_running(&state) {
+        return Err("Stop the server before copying a world.".into());
+    }
+    let saves = saves_path(&root(&install_dir)?);
+    let source = safe_existing_child(&saves, &world_key)?;
+    if !source
+        .extension()
+        .and_then(|x| x.to_str())
+        .map(|x| x.eq_ignore_ascii_case("sav"))
+        .unwrap_or(false)
+    {
+        return Err("Only .sav worlds can be copied.".into());
+    }
+    let target = unique_copy_destination(
+        source.parent().unwrap_or(&saves),
+        source
+            .file_name()
+            .and_then(|x| x.to_str())
+            .unwrap_or("world.sav"),
+    );
+    fs::copy(source, &target).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "Created {}.",
+        target
+            .file_name()
+            .and_then(|x| x.to_str())
+            .unwrap_or("world copy")
+    ))
+}
+
+#[tauri::command]
+fn restore_backup(
+    install_dir: String,
+    backup_key: String,
+    state: State<AppState>,
+) -> Result<String, String> {
+    if is_running(&state) {
+        return Err("Stop the server before restoring a backup.".into());
+    }
+    let root = root(&install_dir)?;
+    let backups = backups_path(&root);
+    let backup = safe_existing_child(&backups, &backup_key)?;
+    let saves = saves_path(&root);
+    let staging = root.join(".dragonwarden-restore-staging");
+    if staging.exists() {
+        fs::remove_dir_all(&staging).map_err(|e| e.to_string())?;
+    }
+    fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+    if backup.is_dir() {
+        copy_dir(&backup, &staging)?;
+    } else if backup
+        .extension()
+        .and_then(|x| x.to_str())
+        .map(|x| x.eq_ignore_ascii_case("zip"))
+        .unwrap_or(false)
+    {
+        let file = fs::File::open(&backup).map_err(|e| e.to_string())?;
+        let mut archive = ZipArchive::new(file).map_err(|_| "Backup archive could not be read.")?;
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).map_err(|e| e.to_string())?;
+            let Some(name) = entry.enclosed_name() else {
+                return Err("Backup archive has an unsafe path.".into());
+            };
+            let out = staging.join(name);
+            if entry.is_dir() {
+                fs::create_dir_all(out).map_err(|e| e.to_string())?;
+            } else {
+                if let Some(parent) = out.parent() {
+                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                let mut output = fs::File::create(out).map_err(|e| e.to_string())?;
+                std::io::copy(&mut entry, &mut output).map_err(|e| e.to_string())?;
+            }
+        }
+    } else {
+        return Err("Choose a DragonWarden backup folder or .zip archive.".into());
+    }
+    if saves.exists() {
+        let pre_restore = backups.join(format!(
+            "pre-restore-{}",
+            Local::now().format("%Y-%m-%d_%H-%M-%S")
+        ));
+        copy_dir(&saves, &pre_restore)?;
+        fs::remove_dir_all(&saves).map_err(|e| e.to_string())?;
+    }
+    fs::rename(&staging, &saves).map_err(|e| e.to_string())?;
+    Ok(
+        "Backup restored. Your previous SaveGames folder was preserved as a pre-restore backup."
+            .into(),
+    )
+}
+
+#[tauri::command]
+fn delete_world_item(
+    install_dir: String,
+    key: String,
+    backup: bool,
+    state: State<AppState>,
+) -> Result<String, String> {
+    if is_running(&state) {
+        return Err("Stop the server before deleting worlds or backups.".into());
+    }
+    let base = if backup {
+        backups_path(&root(&install_dir)?)
+    } else {
+        saves_path(&root(&install_dir)?)
+    };
+    let target = safe_existing_child(&base, &key)?;
+    if !backup
+        && !target
+            .extension()
+            .and_then(|x| x.to_str())
+            .map(|x| x.eq_ignore_ascii_case("sav"))
+            .unwrap_or(false)
+    {
+        return Err("Only .sav world files can be deleted here.".into());
+    }
+    if target.is_dir() {
+        fs::remove_dir_all(target)
+    } else {
+        fs::remove_file(target)
+    }
+    .map_err(|e| e.to_string())?;
+    Ok(if backup {
+        "Backup deleted.".into()
+    } else {
+        "World deleted.".into()
+    })
 }
 
 fn folder_fingerprint(source: &Path) -> Result<String, String> {
@@ -573,6 +887,11 @@ pub fn run() {
             start_server,
             stop_server,
             check_network,
+            list_world_library,
+            import_world,
+            duplicate_world,
+            restore_backup,
+            delete_world_item,
             get_backup_plan,
             set_backup_plan,
             run_backup
