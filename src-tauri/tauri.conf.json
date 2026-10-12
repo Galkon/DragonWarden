@@ -5,5 +5,5 @@
   "identifier": "com.dragonwarden.app",
   "build": { "beforeDevCommand": "npm run dev", "devUrl": "http://127.0.0.1:1420", "beforeBuildCommand": "npm run build", "frontendDist": "../dist" },
   "app": { "windows": [{ "title": "DragonWarden", "width": 1180, "height": 820, "minWidth": 940, "minHeight": 680, "resizable": true }], "security": { "csp": "default-src 'self'; connect-src 'self' https://api.ipify.org; style-src 'self' 'unsafe-inline'; img-src 'self' asset:;" } },
-  "bundle": { "active": true, "targets": "nsis", "icon": ["icons/icon.png"], "windows": { "nsis": { "displayLanguageSelector": false } } }
+  "bundle": { "active": true, "targets": "nsis", "icon": ["icons/icon.png", "icons/icon.ico"], "windows": { "nsis": { "displayLanguageSelector": false } } }
 }
