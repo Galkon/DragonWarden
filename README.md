@@ -27,7 +27,7 @@ npm run tauri build
 
 This repository includes a Windows runner workflow at `.github/workflows/build-windows.yml`. After pushing the repository to GitHub, open **Actions → Build Windows installer → Run workflow**. When it completes, download the `DragonWarden-windows-installer` artifact; it contains the NSIS setup `.exe`.
 
-The workflow also runs whenever you push a version tag, such as `v0.1.0`:
+The workflow also runs when you publish a GitHub Release or push a version tag, such as `v0.1.0`:
 
 ```sh
 git tag v0.1.0
