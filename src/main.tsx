@@ -43,7 +43,16 @@ function App() {
     if (next.installed) {
       const revision = configRevision.current;
       const loadedConfig = await call<Config>("read_config", { installDir: root });
-      if (!configDirty.current && revision === configRevision.current) { setConfig(loadedConfig); savedConfig.current = loadedConfig; }
+      if (!configDirty.current && revision === configRevision.current) {
+        // The dedicated server can return an empty AdminPassword after it has
+        // accepted the password. Keep the write-only value in this session so
+        // status refreshes do not make a valid configuration look incomplete.
+        const effectiveConfig = !loadedConfig.AdminPassword && savedConfig.current.AdminPassword
+          ? { ...loadedConfig, AdminPassword: savedConfig.current.AdminPassword }
+          : loadedConfig;
+        setConfig(effectiveConfig);
+        savedConfig.current = effectiveConfig;
+      }
       setBackup(await call<BackupPlan>("get_backup_plan", { installDir: root }));
       setLibrary(await call<WorldLibrary>("list_world_library", { installDir: root }));
     }
