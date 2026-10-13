@@ -1,6 +1,6 @@
 [package]
 name = "dragonwarden"
-version = "0.1.0"
+version = "0.1.1"
 description = "A safe RuneScape: Dragonwilds dedicated server manager"
 authors = ["DragonWarden contributors"]
 edition = "2021"
