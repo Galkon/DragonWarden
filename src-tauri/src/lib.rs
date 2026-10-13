@@ -10,7 +10,7 @@ use std::{
     sync::Mutex,
     time::{Duration, SystemTime},
 };
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use walkdir::WalkDir;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
@@ -44,6 +44,11 @@ struct BackupResult {
     message: String,
     backup: Option<String>,
     total_bytes: u64,
+}
+#[derive(Clone, Serialize)]
+struct InstallProgress {
+    stage: &'static str,
+    message: &'static str,
 }
 #[derive(Serialize)]
 struct LibraryItem {
@@ -305,11 +310,23 @@ fn inspect_server(install_dir: String, state: State<AppState>) -> Result<ServerS
 }
 
 #[tauri::command]
-fn install_server(install_dir: String) -> Result<String, String> {
+async fn install_server(app: AppHandle, install_dir: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || install_server_blocking(app, install_dir))
+        .await
+        .map_err(|e| format!("The installer task stopped unexpectedly: {e}"))?
+}
+
+fn emit_install(app: &AppHandle, stage: &'static str, message: &'static str) {
+    let _ = app.emit("install-progress", InstallProgress { stage, message });
+}
+
+fn install_server_blocking(app: AppHandle, install_dir: String) -> Result<String, String> {
+    emit_install(&app, "preparing", "Preparing the server folder…");
     let root = root(&install_dir)?;
     fs::create_dir_all(&root).map_err(|e| e.to_string())?;
     let steam = root.join("steamcmd").join("steamcmd.exe");
     if !steam.exists() {
+        emit_install(&app, "steamcmd", "Downloading and unpacking SteamCMD…");
         let download = root.join("steamcmd.zip");
         let quote = |p: &Path| p.display().to_string().replace('\'', "''");
         let script = format!("$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -Uri 'https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip' -OutFile '{}'; Expand-Archive -Force -LiteralPath '{}' -DestinationPath '{}'; Remove-Item -LiteralPath '{}'", quote(&download), quote(&download), quote(&root.join("steamcmd")), quote(&download));
@@ -327,6 +344,11 @@ fn install_server(install_dir: String) -> Result<String, String> {
             return Err("SteamCMD download failed. Check your internet connection and Windows Defender settings.".into());
         }
     }
+    emit_install(
+        &app,
+        "server",
+        "SteamCMD is downloading and validating Dragonwilds. This can take several minutes…",
+    );
     let status = Command::new(&steam)
         .args([
             "+force_install_dir",
@@ -345,6 +367,11 @@ fn install_server(install_dir: String) -> Result<String, String> {
             "SteamCMD could not install the dedicated server. See its console for details.".into(),
         );
     }
+    emit_install(
+        &app,
+        "complete",
+        "Server files are ready. Checking the installation…",
+    );
     Ok("Server installation/update completed. Configure it before starting.".into())
 }
 
