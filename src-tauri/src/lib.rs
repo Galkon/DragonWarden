@@ -473,7 +473,13 @@ fn stop_server(state: State<AppState>) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn check_network(install_dir: String, port: u16) -> Result<NetworkReport, String> {
+async fn check_network(install_dir: String, port: u16) -> Result<NetworkReport, String> {
+    tauri::async_runtime::spawn_blocking(move || check_network_blocking(install_dir, port))
+        .await
+        .map_err(|error| format!("Network check could not complete: {error}"))?
+}
+
+fn check_network_blocking(install_dir: String, port: u16) -> Result<NetworkReport, String> {
     let root = root(&install_dir)?;
     let listening = Command::new("powershell.exe")
         .args([
