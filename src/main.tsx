@@ -33,6 +33,7 @@ function App() {
   const lastAutomaticBackup = useRef(0);
   const configDirty = useRef(false);
   const savedConfig = useRef<Config>(blankConfig);
+  const configRevision = useRef(0);
   const ready = useMemo(() => Boolean(config.OwnerId && config.ServerName && config.DefaultWorldName && config.AdminPassword), [config]);
   const call = async <T,>(name: string, args?: Record<string, unknown>) => invoke<T>(name, args);
   const refresh = async (root = installDir) => {
@@ -40,8 +41,9 @@ function App() {
     const next = await call<ServerStatus>("inspect_server", { installDir: root });
     setStatus(next);
     if (next.installed) {
+      const revision = configRevision.current;
       const loadedConfig = await call<Config>("read_config", { installDir: root });
-      if (!configDirty.current) { setConfig(loadedConfig); savedConfig.current = loadedConfig; }
+      if (!configDirty.current && revision === configRevision.current) { setConfig(loadedConfig); savedConfig.current = loadedConfig; }
       setBackup(await call<BackupPlan>("get_backup_plan", { installDir: root }));
       setLibrary(await call<WorldLibrary>("list_world_library", { installDir: root }));
     }
@@ -59,11 +61,11 @@ function App() {
     return () => clearInterval(id);
   }, [installDir, status?.installed, backup.enabled, backup.interval_minutes, busy]);
   const run = async (label: string, action: () => Promise<void>) => { setBusy(label); try { await action(); } catch (error) { setNotice(String(error)); } finally { setBusy(null); } };
-  const chooseFolder = () => run("folder", async () => { const selected = await open({ directory: true, multiple: false, title: "Choose a folder for Dragonwilds" }); if (typeof selected === "string") { configDirty.current = false; setConfigChanged(false); setInstallDir(selected); await call("remember_install_dir", { installDir: selected }); await refresh(selected); setNotice("Server folder selected."); } });
+  const chooseFolder = () => run("folder", async () => { const selected = await open({ directory: true, multiple: false, title: "Choose a folder for Dragonwilds" }); if (typeof selected === "string") { configRevision.current += 1; configDirty.current = false; setConfigChanged(false); setInstallDir(selected); await call("remember_install_dir", { installDir: selected }); await refresh(selected); setNotice("Server folder selected."); } });
   const install = () => run("install", async () => { if (!installDir) throw new Error("Choose a folder first."); setInstallProgress("Preparing the installer…"); try { setNotice(await call<string>("install_server", { installDir })); await refresh(); } finally { setInstallProgress(null); } });
   const start = () => run("start", async () => { if (!ready) throw new Error("Complete Owner ID and server settings before starting."); await call("save_config", { installDir, config }); setNotice(await call<string>("start_server", { installDir })); await refresh(); });
   const stop = () => run("stop", async () => { setNotice(await call<string>("stop_server", {})); await refresh(); });
-  const saveConfig = (event: FormEvent) => { event.preventDefault(); run("config", async () => { setNotice(await call<string>("save_config", { installDir, config })); savedConfig.current = config; configDirty.current = false; setConfigChanged(false); }); };
+  const saveConfig = (event: FormEvent) => { event.preventDefault(); run("config", async () => { setNotice(await call<string>("save_config", { installDir, config })); configRevision.current += 1; savedConfig.current = config; configDirty.current = false; setConfigChanged(false); }); };
   const testNetwork = () => run("network", async () => { const report = await call<NetworkReport>("check_network", { installDir, port: 7777 }); setNetwork(report); setNotice(report.external_verification); });
   const importWorld = () => run("import", async () => { const selected = await open({ multiple: false, filters: [{ name: "Dragonwilds world", extensions: ["sav"] }] }); if (typeof selected === "string") { setNotice(await call<string>("import_world", { installDir, sourcePath: selected })); await refresh(); } });
   const copyWorld = (worldKey: string) => run("copy", async () => { setNotice(await call<string>("duplicate_world", { installDir, worldKey })); await refresh(); });
@@ -75,7 +77,7 @@ function App() {
       await refresh();
     });
   };
-  const update = (key: string, value: string) => setConfig((current) => { const next = { ...current, [key]: value }; const changed = configKeys.some((configKey) => next[configKey] !== savedConfig.current[configKey]); configDirty.current = changed; setConfigChanged(changed); return next; });
+  const update = (key: string, value: string) => setConfig((current) => { const next = { ...current, [key]: value }; const changed = configKeys.some((configKey) => next[configKey] !== savedConfig.current[configKey]); configRevision.current += 1; configDirty.current = changed; setConfigChanged(changed); return next; });
   const isRunning = Boolean(status?.is_running);
   const setupComplete = Boolean(status?.installed && ready);
   const startDisabled = !status?.installed || !ready || Boolean(busy);

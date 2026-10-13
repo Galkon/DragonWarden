@@ -465,11 +465,23 @@ fn stop_server(state: State<AppState>) -> Result<String, String> {
         .lock()
         .map_err(|_| "Server state lock failed")?;
     if let Some(mut child) = locked.take() {
+        #[cfg(windows)]
+        {
+            let process_id = child.id().to_string();
+            let result = Command::new("taskkill.exe")
+                .args(["/PID", &process_id, "/T", "/F"])
+                .status()
+                .map_err(|e| format!("Could not stop the server process tree: {e}"))?;
+            if !result.success() {
+                return Err("Windows could not stop the server process tree.".into());
+            }
+        }
+        #[cfg(not(windows))]
         child
             .kill()
             .map_err(|e| format!("Could not stop the server: {e}"))?;
         let _ = child.wait();
-        Ok("Server stopped.".into())
+        Ok("Server stopped and its console process tree was closed.".into())
     } else {
         Err("DragonWarden has no running server process to stop.".into())
     }
