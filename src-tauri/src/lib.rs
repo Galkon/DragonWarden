@@ -192,17 +192,20 @@ fn write_config(file: &Path, mut values: BTreeMap<String, String>) -> Result<(),
     fs::write(file, output).map_err(|e| e.to_string())
 }
 fn is_running(state: &AppState) -> bool {
-    state
-        .server
-        .lock()
-        .ok()
-        .and_then(|mut child| {
-            child.as_mut().and_then(|c| c.try_wait().ok()).map(|_| {
-                *child = None;
-            })
-        })
-        .is_none()
-        && state.server.lock().map(|x| x.is_some()).unwrap_or(false)
+    let Ok(mut server) = state.server.lock() else {
+        return false;
+    };
+    let Some(child) = server.as_mut() else {
+        return false;
+    };
+    match child.try_wait() {
+        Ok(None) => true,
+        Ok(Some(_)) => {
+            *server = None;
+            false
+        }
+        Err(_) => true,
+    }
 }
 fn timestamp(time: SystemTime) -> String {
     chrono::DateTime::<Local>::from(time)

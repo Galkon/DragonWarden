@@ -17,6 +17,7 @@ type LibraryItem = { key: string; name: string; size_bytes: number; modified: st
 type WorldLibrary = { worlds: LibraryItem[]; backups: LibraryItem[] };
 type BackupPlan = { enabled: boolean; interval_minutes: number; max_gib: number; compress_after_hours: number };
 const blankConfig: Config = { OwnerId: "", ServerName: "My Dragonwilds Server", DefaultWorldName: "My World", AdminPassword: "", WorldPassword: "" };
+const configKeys = ["OwnerId", "ServerName", "DefaultWorldName", "AdminPassword", "WorldPassword"];
 
 function App() {
   const [installDir, setInstallDir] = useState("");
@@ -28,8 +29,10 @@ function App() {
   const [notice, setNotice] = useState("Choose a folder to install your dedicated server.");
   const [busy, setBusy] = useState<string | null>(null);
   const [installProgress, setInstallProgress] = useState<string | null>(null);
+  const [configChanged, setConfigChanged] = useState(false);
   const lastAutomaticBackup = useRef(0);
   const configDirty = useRef(false);
+  const savedConfig = useRef<Config>(blankConfig);
   const ready = useMemo(() => Boolean(config.OwnerId && config.ServerName && config.DefaultWorldName && config.AdminPassword), [config]);
   const call = async <T,>(name: string, args?: Record<string, unknown>) => invoke<T>(name, args);
   const refresh = async (root = installDir) => {
@@ -37,8 +40,8 @@ function App() {
     const next = await call<ServerStatus>("inspect_server", { installDir: root });
     setStatus(next);
     if (next.installed) {
-      const savedConfig = await call<Config>("read_config", { installDir: root });
-      if (!configDirty.current) setConfig(savedConfig);
+      const loadedConfig = await call<Config>("read_config", { installDir: root });
+      if (!configDirty.current) { setConfig(loadedConfig); savedConfig.current = loadedConfig; }
       setBackup(await call<BackupPlan>("get_backup_plan", { installDir: root }));
       setLibrary(await call<WorldLibrary>("list_world_library", { installDir: root }));
     }
@@ -56,11 +59,11 @@ function App() {
     return () => clearInterval(id);
   }, [installDir, status?.installed, backup.enabled, backup.interval_minutes, busy]);
   const run = async (label: string, action: () => Promise<void>) => { setBusy(label); try { await action(); } catch (error) { setNotice(String(error)); } finally { setBusy(null); } };
-  const chooseFolder = () => run("folder", async () => { const selected = await open({ directory: true, multiple: false, title: "Choose a folder for Dragonwilds" }); if (typeof selected === "string") { configDirty.current = false; setInstallDir(selected); await call("remember_install_dir", { installDir: selected }); await refresh(selected); setNotice("Server folder selected."); } });
+  const chooseFolder = () => run("folder", async () => { const selected = await open({ directory: true, multiple: false, title: "Choose a folder for Dragonwilds" }); if (typeof selected === "string") { configDirty.current = false; setConfigChanged(false); setInstallDir(selected); await call("remember_install_dir", { installDir: selected }); await refresh(selected); setNotice("Server folder selected."); } });
   const install = () => run("install", async () => { if (!installDir) throw new Error("Choose a folder first."); setInstallProgress("Preparing the installer…"); try { setNotice(await call<string>("install_server", { installDir })); await refresh(); } finally { setInstallProgress(null); } });
   const start = () => run("start", async () => { if (!ready) throw new Error("Complete Owner ID and server settings before starting."); await call("save_config", { installDir, config }); setNotice(await call<string>("start_server", { installDir })); await refresh(); });
   const stop = () => run("stop", async () => { setNotice(await call<string>("stop_server", {})); await refresh(); });
-  const saveConfig = (event: FormEvent) => { event.preventDefault(); run("config", async () => { setNotice(await call<string>("save_config", { installDir, config })); configDirty.current = false; }); };
+  const saveConfig = (event: FormEvent) => { event.preventDefault(); run("config", async () => { setNotice(await call<string>("save_config", { installDir, config })); savedConfig.current = config; configDirty.current = false; setConfigChanged(false); }); };
   const testNetwork = () => run("network", async () => { const report = await call<NetworkReport>("check_network", { installDir, port: 7777 }); setNetwork(report); setNotice(report.external_verification); });
   const importWorld = () => run("import", async () => { const selected = await open({ multiple: false, filters: [{ name: "Dragonwilds world", extensions: ["sav"] }] }); if (typeof selected === "string") { setNotice(await call<string>("import_world", { installDir, sourcePath: selected })); await refresh(); } });
   const copyWorld = (worldKey: string) => run("copy", async () => { setNotice(await call<string>("duplicate_world", { installDir, worldKey })); await refresh(); });
@@ -72,7 +75,7 @@ function App() {
       await refresh();
     });
   };
-  const update = (key: string, value: string) => { configDirty.current = true; setConfig((current) => ({ ...current, [key]: value })); };
+  const update = (key: string, value: string) => setConfig((current) => { const next = { ...current, [key]: value }; const changed = configKeys.some((configKey) => next[configKey] !== savedConfig.current[configKey]); configDirty.current = changed; setConfigChanged(changed); return next; });
   const isRunning = Boolean(status?.is_running);
   const setupComplete = Boolean(status?.installed && ready);
   const startDisabled = !status?.installed || !ready || Boolean(busy);
@@ -85,7 +88,7 @@ function App() {
         <section className="stat-grid"><StatCard icon={Globe2} label="World" value={config.DefaultWorldName || "My World"}/><StatCard icon={Users} label="Players" value={isRunning ? "Online" : "0 online"}/><StatCard icon={Server} label="Version" value={status?.installed ? "Installed" : "Not installed"}/><StatCard icon={Network} label="Ports" value="7777 / 7778"/></section>
         <section className="console-card" id="connection"><div className="section-heading inline-heading"><div><h2>Connection status</h2><p>Check your local network and port forwarding.</p></div><button className="ghost-button small" onClick={testNetwork} disabled={!status?.installed || Boolean(busy)}>{busy === "network" ? <LoaderCircle className="spin"/> : <Network size={15}/>} Run port check</button></div><div className="connection-list"><ConnectionRow label="Game port" value="7777" okay={network?.listening}/><ConnectionRow label="Firewall" value={network?.firewall_rule ? "Allowed" : "Not checked"} okay={network?.firewall_rule}/>{network?.public_ip && <ConnectionRow label="Public IP" value={network.public_ip} copy/>}</div></section>
       </div><div className="side-column">
-        <form id="configuration" className="config-card" onSubmit={saveConfig}><div className="section-heading"><h2>Server configuration</h2><p>Basic settings to get you started.</p></div><Field label="Server name" value={config.ServerName} onChange={(value) => update("ServerName", value)} disabled={isRunning}/><Field label="World name" value={config.DefaultWorldName} onChange={(value) => update("DefaultWorldName", value)} disabled={isRunning}/><Field label="Owner ID" value={config.OwnerId} placeholder="Your in-game Player ID" onChange={(value) => update("OwnerId", value)} disabled={isRunning}/><Field label="Admin password" type="password" value={config.AdminPassword} placeholder="Required to start" onChange={(value) => update("AdminPassword", value)} disabled={isRunning}/><Field label="World password" type="password" value={config.WorldPassword} placeholder="Optional" onChange={(value) => update("WorldPassword", value)} disabled={isRunning}/><button className="primary-button full" disabled={isRunning || !status?.installed || Boolean(busy)} type="submit">{busy === "config" ? <LoaderCircle className="spin"/> : <Save size={16}/>} Save configuration</button></form>
+        <form id="configuration" className="config-card" onSubmit={saveConfig}><div className="section-heading"><h2>Server configuration</h2><p>Basic settings to get you started.</p></div><Field label="Server name" value={config.ServerName} onChange={(value) => update("ServerName", value)} disabled={isRunning}/><Field label="World name" value={config.DefaultWorldName} onChange={(value) => update("DefaultWorldName", value)} disabled={isRunning}/><Field label="Owner ID" value={config.OwnerId} placeholder="Your in-game Player ID" onChange={(value) => update("OwnerId", value)} disabled={isRunning}/><Field label="Admin password" type="password" value={config.AdminPassword} placeholder="Required to start" onChange={(value) => update("AdminPassword", value)} disabled={isRunning}/><Field label="World password" type="password" value={config.WorldPassword} placeholder="Optional" onChange={(value) => update("WorldPassword", value)} disabled={isRunning}/><button className="primary-button full" disabled={isRunning || !status?.installed || !configChanged || Boolean(busy)} type="submit">{busy === "config" ? <LoaderCircle className="spin"/> : <Save size={16}/>} Save configuration</button></form>
         <details id="advanced" className="advanced-card"><summary><span><Settings size={17}/> Advanced settings</span><ChevronRight size={17}/></summary><div className="advanced-content"><label className="toggle-row"><span>Automatic backups <small>Every {backup.interval_minutes} minutes</small></span><input type="checkbox" checked={backup.enabled} onChange={(event) => setBackup({ ...backup, enabled: event.target.checked })}/></label><div className="two-fields"><NumberField label="Minutes" value={backup.interval_minutes} onChange={(value) => setBackup({ ...backup, interval_minutes: value })}/><NumberField label="Storage (GiB)" value={backup.max_gib} onChange={(value) => setBackup({ ...backup, max_gib: value })}/></div><button type="button" className="ghost-button small" onClick={() => run("backup settings", async () => { await call("set_backup_plan", { installDir, plan: backup }); setNotice("Backup settings saved."); })}><Save size={15}/> Save backup plan</button></div></details>
       </div></div>
       <section className="library-card" id="library"><div className="section-heading inline-heading"><div><h2>World library</h2><p>Import, duplicate, or restore your local worlds and managed backups.</p></div><button className="ghost-button small" onClick={importWorld} disabled={!status?.installed || isRunning || Boolean(busy)}><Upload size={15}/> Import world</button></div><div className="library-grid"><LibraryList title="Live worlds" items={library.worlds} empty="No saved worlds found." onCopy={copyWorld} onDelete={(item) => deleteItem(item.key, item.name, false)}/><LibraryList title="Backups" items={library.backups} empty="No managed backups yet." onRestore={restoreBackup} onDelete={(item) => deleteItem(item.key, item.name, true)}/></div></section>
