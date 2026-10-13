@@ -1,0 +1,17 @@
+{
+  "app": {
+    "windows": [{
+      "title": "DragonWarden",
+      "width": 1180,
+      "height": 820,
+      "minWidth": 940,
+      "minHeight": 680,
+      "resizable": true,
+      "decorations": true,
+      "theme": "Dark",
+      "transparent": true,
+      "noRedirectionBitmap": true,
+      "windowEffects": { "effects": ["acrylic"] }
+    }]
+  }
+}
