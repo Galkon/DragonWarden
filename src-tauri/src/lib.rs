@@ -94,7 +94,15 @@ fn root(path: &str) -> Result<PathBuf, String> {
     }
 }
 fn game_root(root: &Path) -> PathBuf {
-    root.join("RSDragonwilds")
+    let existing_layout = root.join("RSDragonwilds");
+    if existing_layout.exists() {
+        existing_layout
+    } else {
+        root.join("server").join("RSDragonwilds")
+    }
+}
+fn server_install_path(root: &Path) -> PathBuf {
+    root.join("server")
 }
 fn config_path(root: &Path) -> PathBuf {
     game_root(root)
@@ -121,9 +129,15 @@ fn local_settings_path() -> PathBuf {
 }
 fn find_exe(root: &Path) -> Option<PathBuf> {
     [
-        game_root(root).join("Binaries/Win64/RSDragonwildsServer-Win64-Shipping.exe"),
-        game_root(root).join("Binaries/Win64/RSDragonwilds.exe"),
+        // Steam's current Windows tool launch target.
+        root.join("RSDragonwildsServer.exe"),
+        root.join("server").join("RSDragonwildsServer.exe"),
+        // Jagex documentation and earlier server layouts.
         root.join("RSDragonwilds.exe"),
+        root.join("server").join("RSDragonwilds.exe"),
+        game_root(root).join("Binaries/Win64/RSDragonwildsServer-Win64-Shipping.exe"),
+        game_root(root).join("Binaries/Win64/RSDragonwildsServer.exe"),
+        game_root(root).join("Binaries/Win64/RSDragonwilds.exe"),
     ]
     .into_iter()
     .find(|p| p.exists())
@@ -324,6 +338,8 @@ fn install_server_blocking(app: AppHandle, install_dir: String) -> Result<String
     emit_install(&app, "preparing", "Preparing the server folder…");
     let root = root(&install_dir)?;
     fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let server_path = server_install_path(&root);
+    fs::create_dir_all(&server_path).map_err(|e| e.to_string())?;
     let steam = root.join("steamcmd").join("steamcmd.exe");
     if !steam.exists() {
         emit_install(&app, "steamcmd", "Downloading and unpacking SteamCMD…");
@@ -352,7 +368,7 @@ fn install_server_blocking(app: AppHandle, install_dir: String) -> Result<String
     let status = Command::new(&steam)
         .args([
             "+force_install_dir",
-            &root.display().to_string(),
+            &server_path.display().to_string(),
             "+login",
             "anonymous",
             "+app_update",
@@ -372,6 +388,9 @@ fn install_server_blocking(app: AppHandle, install_dir: String) -> Result<String
         "complete",
         "Server files are ready. Checking the installation…",
     );
+    if find_exe(&root).is_none() {
+        return Err("SteamCMD completed, but DragonWarden could not find the server executable. Open the selected folder and check its server subfolder for RSDragonwildsServer.exe.".into());
+    }
     Ok("Server installation/update completed. Configure it before starting.".into())
 }
 
